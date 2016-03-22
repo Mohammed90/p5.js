@@ -80,9 +80,10 @@ var p5 = function(sketch, node, sync) {
    * define initial environment properties such as screen size and background
    * color and to load media such as images and fonts as the program starts.
    * There can only be one setup() function for each program and it shouldn't
-   * be called again after its initial execution. Note: Variables declared
-   * within setup() are not accessible within other functions, including
-   * draw().
+   * be called again after its initial execution.
+   * <br><br>
+   * Note: Variables declared within setup() are not accessible within other
+   * functions, including draw().
    *
    * @method setup
    * @example
@@ -104,17 +105,18 @@ var p5 = function(sketch, node, sync) {
   /**
    * Called directly after setup(), the draw() function continuously executes
    * the lines of code contained inside its block until the program is stopped
-   * or noLoop() is called. draw() is called automatically and should never be
-   * called explicitly.
-   *
+   * or noLoop() is called. Note if noLoop() is called in setup(), draw() will
+   * still be executed once before stopping. draw() is called automatically and
+   * should never be called explicitly.
+   * <br><br>
    * It should always be controlled with noLoop(), redraw() and loop(). After
    * noLoop() stops the code in draw() from executing, redraw() causes the
    * code inside draw() to execute once, and loop() will cause the code
    * inside draw() to resume executing continuously.
-   *
+   * <br><br>
    * The number of times draw() executes in each second may be controlled with
    * the frameRate() function.
-   *
+   * <br><br>
    * There can only be one draw() function for each sketch, and draw() must
    * exist if you want the code to run continuously, or to process events such
    * as mousePressed(). Sometimes, you might have an empty call to draw() in
@@ -144,12 +146,13 @@ var p5 = function(sketch, node, sync) {
   //////////////////////////////////////////////
 
   this._setupDone = false;
-  this.pixelDensity = window.devicePixelRatio || 1; // for handling hidpi
+  // for handling hidpi
+  this._pixelDensity = Math.ceil(window.devicePixelRatio) || 1;
   this._userNode = node;
   this._curElement = null;
   this._elements = [];
+  this._requestAnimId = 0;
   this._preloadCount = 0;
-  this._updateInterval = 0;
   this._isGlobal = false;
   this._loop = true;
   this._styles = [];
@@ -161,6 +164,8 @@ var p5 = function(sketch, node, sync) {
     'mousemove': null,
     'mousedown': null,
     'mouseup': null,
+    'dragend': null,
+    'dragover': null,
     'click': null,
     'mouseover': null,
     'mouseout': null,
@@ -174,23 +179,15 @@ var p5 = function(sketch, node, sync) {
     'blur': null
   };
 
+  this._events.wheel = null;
+  this._loadingScreenId = 'p5_loading';
+
   if (window.DeviceOrientationEvent) {
     this._events.deviceorientation = null;
-  } else if (window.DeviceMotionEvent) {
+  }
+  if (window.DeviceMotionEvent && !window._isNodeWebkit) {
     this._events.devicemotion = null;
-  } else {
-    this._events.MozOrientation = null;
   }
-
-  //FF doesn't recognize mousewheel as of FF3.x
-  if (/Firefox/i.test(navigator.userAgent)) {
-    this._events.DOMMouseScroll = null;
-  } else {
-    this._events.mousewheel = null;
-  }
-
-
-  this._loadingScreenId = 'p5_loading';
 
   this._start = function () {
     // Find node if id given
@@ -211,7 +208,6 @@ var p5 = function(sketch, node, sync) {
     );
 
     var userPreload = this.preload || window.preload; // look for "preload"
-    var context = this._isGlobal ? window : this;
     if (userPreload) {
 
       // Setup loading screen
@@ -226,18 +222,21 @@ var p5 = function(sketch, node, sync) {
         var node = this._userNode || document.body;
         node.appendChild(loadingScreen);
       }
-
-      var methods = this._preloadMethods;
-      Object.keys(methods).forEach(function(f) {
-        var methodContext = methods[f];
-        var originalFunc = methodContext[f];
-        methodContext[f] = function() {
-          var argsArray = Array.prototype.slice.call(arguments);
-          return context._preload(originalFunc, methodContext, argsArray);
-        };
-      });
+      // var methods = this._preloadMethods;
+      for (var method in this._preloadMethods){
+        // default to p5 if no object defined
+        this._preloadMethods[method] = this._preloadMethods[method] || p5;
+        var obj = this._preloadMethods[method];
+        //it's p5, check if it's global or instance
+        if (obj === p5.prototype || obj === p5){
+          obj = this._isGlobal ? window : this;
+        }
+        this._registeredPreloadMethods[method] = obj[method];
+        obj[method] = this._wrapPreload(obj, method);
+      }
 
       userPreload();
+      this._runIfPreloadsAreDone();
     } else {
       this._setup();
       this._runFrames();
@@ -245,24 +244,40 @@ var p5 = function(sketch, node, sync) {
     }
   }.bind(this);
 
-  this._preload = function (func, obj, args) {
+  this._runIfPreloadsAreDone = function(){
+    var context = this._isGlobal ? window : this;
+    if (context._preloadCount === 0) {
+      var loadingScreen = document.getElementById(context._loadingScreenId);
+      if (loadingScreen) {
+        loadingScreen.parentNode.removeChild(loadingScreen);
+      }
+      context._setup();
+      context._runFrames();
+      context._draw();
+    }
+  };
+
+  this._decrementPreload = function(){
+    var context = this._isGlobal ? window : this;
+    context._setProperty('_preloadCount', context._preloadCount - 1);
+    context._runIfPreloadsAreDone();
+  };
+
+  this._wrapPreload = function(obj, fnName){
+    return function(){
+      //increment counter
+      this._incrementPreload();
+      //call original function
+      var args = Array.prototype.slice.call(arguments);
+      args.push(this._decrementPreload.bind(this));
+      return this._registeredPreloadMethods[fnName].apply(obj, args);
+    }.bind(this);
+  };
+
+  this._incrementPreload = function(){
     var context = this._isGlobal ? window : this;
     context._setProperty('_preloadCount', context._preloadCount + 1);
-    var preloadCallback = function (resp) {
-      context._setProperty('_preloadCount', context._preloadCount - 1);
-      if (context._preloadCount === 0) {
-        var loadingScreen = document.getElementById(context._loadingScreenId);
-        if (loadingScreen) {
-          loadingScreen.parentNode.removeChild(loadingScreen);
-        }
-        context._setup();
-        context._runFrames();
-        context._draw();
-      }
-    };
-    args.push(preloadCallback);
-    return func.apply(obj, args);
-  }.bind(this);
+  };
 
   this._setup = function() {
 
@@ -270,8 +285,10 @@ var p5 = function(sketch, node, sync) {
     var context = this._isGlobal ? window : this;
     if (typeof context.preload === 'function') {
       for (var f in this._preloadMethods) {
-        //var o = this._preloadMethods[f];
         context[f] = this._preloadMethods[f][f];
+        if (context[f] && this) {
+          context[f] = context[f].bind(this);
+        }
       }
     }
 
@@ -281,17 +298,14 @@ var p5 = function(sketch, node, sync) {
       context.setup();
     }
 
-    // // unhide hidden canvas that was created
-    // this.canvas.style.visibility = '';
-    // this.canvas.className = this.canvas.className.replace('p5_hidden', '');
-
     // unhide any hidden canvases that were created
-    var reg = new RegExp(/(^|\s)p5_hidden(?!\S)/g);
-    var canvases = document.getElementsByClassName('p5_hidden');
+    var canvases = document.getElementsByTagName('canvas');
     for (var i = 0; i < canvases.length; i++) {
       var k = canvases[i];
-      k.style.visibility = '';
-      k.className = k.className.replace(reg, '');
+      if (k.dataset.hidden === 'true') {
+        k.style.visibility = '';
+        delete(k.dataset.hidden);
+      }
     }
     this._setupDone = true;
 
@@ -311,13 +325,18 @@ var p5 = function(sketch, node, sync) {
     // if looping is off, so we bypass the time delay if that
     // is the case.
     var epsilon = 5;
-    if (!this.loop ||
+    if (!this._loop ||
         time_since_last >= target_time_between_frames - epsilon) {
+
+      //mandatory update values(matrixs and stack) for 3d
+      if(this._renderer.isP3D){
+        this._renderer._update();
+      }
+
       this._setProperty('frameCount', this.frameCount + 1);
+      this._updateMouseCoords();
+      this._updateTouchCoords();
       this.redraw();
-      this._updatePAccelerations();
-      this._updatePMouseCoords();
-      this._updatePTouchCoords();
       this._frameRate = 1000.0/(now - this._lastFrameTime);
       this._lastFrameTime = now;
     }
@@ -325,7 +344,7 @@ var p5 = function(sketch, node, sync) {
     // get notified the next time the browser gives us
     // an opportunity to draw.
     if (this._loop) {
-      window.requestAnimationFrame(this._draw);
+      this._requestAnimId = window.requestAnimationFrame(this._draw);
     }
   }.bind(this);
 
@@ -365,8 +384,8 @@ var p5 = function(sketch, node, sync) {
 
       // stop draw
       this._loop = false;
-      if (this._updateInterval) {
-        clearTimeout(this._updateInterval);
+      if (this._requestAnimId) {
+        window.cancelAnimationFrame(this._requestAnimId);
       }
 
       // unregister events sketch-wide
@@ -416,11 +435,12 @@ var p5 = function(sketch, node, sync) {
     // window.p5 = undefined;
   }.bind(this);
 
-
-  // attach constants to p5 instance
-  for (var k in constants) {
-    p5.prototype[k] = constants[k];
-  }
+  // call any registered init functions
+  this._registeredMethods.init.forEach(function (f) {
+    if (typeof(f) !== 'undefined') {
+      f.call(this);
+    }
+  }, this);
 
   // If the user has created a global setup or draw function,
   // assume "global" mode and make everything global (i.e. on the window)
@@ -461,16 +481,18 @@ var p5 = function(sketch, node, sync) {
     }
   }
 
-  var self = this;
-  window.addEventListener('focus', function() {
-    self._setProperty('focused', true);
+  var focusHandler = function() {
+    this._setProperty('focused', true);
+  }.bind(this);
+  var blurHandler = function() {
+    this._setProperty('focused', false);
+  }.bind(this);
+  window.addEventListener('focus', focusHandler);
+  window.addEventListener('blur', blurHandler);
+  this.registerMethod('remove', function() {
+    window.removeEventListener('focus', focusHandler);
+    window.removeEventListener('blur', blurHandler);
   });
-
-  window.addEventListener('blur', function() {
-    self._setProperty('focused', false);
-  });
-
-  // TODO: ???
 
   if (sync) {
     this._start();
@@ -483,6 +505,10 @@ var p5 = function(sketch, node, sync) {
   }
 };
 
+// attach constants to p5 prototype
+for (var k in constants) {
+  p5.prototype[k] = constants[k];
+}
 
 // functions that cause preload to wait
 // more can be added by using registerPreloadMethod(func)
@@ -496,12 +522,14 @@ p5.prototype._preloadMethods = {
   loadFont: p5.prototype
 };
 
-p5.prototype._registeredMethods = { pre: [], post: [], remove: [] };
+p5.prototype._registeredMethods = { init: [], pre: [], post: [], remove: [] };
 
-p5.prototype.registerPreloadMethod = function(f, o) {
-  o = o || p5;
-  if (!p5.prototype._preloadMethods.hasOwnProperty(f)) {
-    p5.prototype._preloadMethods[f] = o;
+p5.prototype._registeredPreloadMethods = {};
+
+p5.prototype.registerPreloadMethod = function(fnString, obj) {
+  // obj = obj || p5.prototype;
+  if (!p5.prototype._preloadMethods.hasOwnProperty(fnString)) {
+    p5.prototype._preloadMethods[fnString] = obj;
   }
 };
 
